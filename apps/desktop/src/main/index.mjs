@@ -21,7 +21,6 @@ import {
   normalizeStagedResourcePart,
   remapStagedResourceMetadata,
 } from "./staged-resource.mjs";
-import { cacheStagedResourceBytes, listPendingStagedResources, listStagedResourceMetadata, readStagedResourceMetadata, recordStagedResourceAlias } from "./staged-resource-alias.mjs";
 import {
   isMountedDiskImageVolume,
   isMountedInstallerPath,
@@ -915,15 +914,9 @@ const registerResourceProtocol = () => {
 
     const directory = stagedResourceDirectory();
     try {
-      const metadata = await readStagedResourceMetadata(directory, stagedId);
+      const metadata = JSON.parse(await readFile(join(directory, `${stagedId}.json`), "utf8"));
       const path = join(directory, `${stagedId}.bin`);
-      const size = await stat(path).then((details) => details.size).catch(() => null);
-      if (size === null && isSafeResourceId(metadata.resourceId)) {
-        const target = new URL(`edgeever-resource://resource/${encodeURIComponent(metadata.resourceId)}`);
-        target.search = new URL(request.url).search;
-        return handleResourceProtocolRequest(new Request(target, { headers: request.headers }));
-      }
-      if (size === null) throw new Error("Staged bytes are missing");
+      const { size } = await stat(path);
       const stream = createReadStream(path);
       const headers = new Headers({
         "Content-Type": metadata.type || "application/octet-stream",
@@ -1742,24 +1735,12 @@ const startApplication = async () => {
   ipcMain.handle("desktop:list-staged-resources", async () => {
     const directory = stagedResourceDirectory();
     try { await mkdir(directory, { recursive: true }); await restrictDirectory(directory); } catch {}
-    return listPendingStagedResources(directory);
-  });
-  ipcMain.handle("desktop:list-staged-resource-aliases", async (_event, memoId) => {
-    const metadata = await listStagedResourceMetadata(stagedResourceDirectory());
-    return metadata.filter((item) => (!memoId || item.memoId === memoId) && isSafeResourceId(item.resourceId))
-      .map((item) => ({ id: item.id, memoId: item.memoId, resourceId: item.resourceId }));
-  });
-  ipcMain.handle("desktop:record-staged-resource-alias", async (_event, id, uploadedUrl) => {
-    const cacheDirectory = resourceCacheDirectory();
-    const resourceId = await cacheStagedResourceBytes(stagedResourceDirectory(), cacheDirectory, id, uploadedUrl);
-    await Promise.all([
-      restrictDirectory(cacheDirectory),
-      restrictFile(join(cacheDirectory, `${resourceId}.bin`)),
-      restrictFile(join(cacheDirectory, `${resourceId}.json`)),
-    ]);
-    const result = await recordStagedResourceAlias(stagedResourceDirectory(), id, uploadedUrl);
-    await restrictFile(join(stagedResourceDirectory(), `${id}.json`));
-    return { id: result.id, resourceId: result.resourceId };
+    const names = await readdir(directory);
+    const result = [];
+    for (const name of names.filter((value) => value.endsWith(".json"))) {
+      try { result.push(JSON.parse(await readFile(join(directory, name), "utf8"))); } catch {}
+    }
+    return result;
   });
   ipcMain.handle("desktop:remap-staged-resource-memo-ids", async (_event, mappings) => {
     if (!Array.isArray(mappings) || mappings.length === 0) return { updated: 0 };
@@ -1783,13 +1764,8 @@ const startApplication = async () => {
   ipcMain.handle("desktop:read-staged-resource", async (_event, id) => {
     if (!isSafeResourceId(id)) throw new Error("Invalid staged resource id");
     const directory = stagedResourceDirectory();
-    const metadata = await readStagedResourceMetadata(directory, id);
-    const bytes = await readFile(join(directory, `${id}.bin`)).catch(async (error) => {
-      if (!isSafeResourceId(metadata.resourceId)) throw error;
-      const response = await handleResourceProtocolRequest(new Request(`edgeever-resource://resource/${encodeURIComponent(metadata.resourceId)}`));
-      if (!response.ok) throw new Error(`Resource request failed (${response.status})`);
-      return Buffer.from(await response.arrayBuffer());
-    });
+    const metadata = JSON.parse(await readFile(join(directory, `${id}.json`), "utf8"));
+    const bytes = await readFile(join(directory, `${id}.bin`));
     return { ...metadata, bytes: new Uint8Array(bytes) };
   });
   ipcMain.handle("desktop:read-staged-resource-part", async (_event, id, start, length) => {
@@ -1825,16 +1801,14 @@ const startApplication = async () => {
   ipcMain.handle("desktop:read-wechat-import-media", async (_event, importId, mediaId) => (
     wechatShare().readMedia(importId, mediaId)
   ));
-  ipcMain.handle("desktop:finish-wechat-import", async (_event, importId, success) => {
-    await wechatShare().finish(importId, success === true);
+  ipcMain.handle("desktop:finish-wechat-import", async (_event, importId) => {
+    await wechatShare().finish(importId);
   });
-  ipcMain.handle("desktop:retry-wechat-import", (_event, importId) => wechatShare().retry(importId));
   ipcMain.handle("desktop:remove-staged-resource", async (_event, id) => {
     if (!isSafeResourceId(id)) throw new Error("Invalid staged resource id");
     const directory = stagedResourceDirectory();
-    const alias = await readStagedResourceMetadata(directory, id).catch(() => null);
     await Promise.all([
-      ...(isSafeResourceId(alias?.resourceId) ? [] : [unlink(join(directory, `${id}.json`)).catch(() => {})]),
+      unlink(join(directory, `${id}.json`)).catch(() => {}),
       unlink(join(directory, `${id}.bin`)).catch(() => {}),
       unlink(join(directory, `${id}.pending.json`)).catch(() => {}),
       unlink(join(directory, `${id}.pending.bin`)).catch(() => {}),

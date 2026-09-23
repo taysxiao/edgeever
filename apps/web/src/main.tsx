@@ -10,7 +10,6 @@ import { withEnvironmentTitlePrefix } from "./lib/environment-title";
 import { initializeTheme, ThemeProvider } from "./components/ThemeProvider";
 import { applyEditorBodyFontPreference } from "./lib/editor-body-font";
 import { installEditorBodyFontFaces } from "./lib/editor-body-font-faces";
-import { applyUiFontPreference } from "./lib/ui-font";
 import { DesktopRendererErrorBoundary } from "./components/DesktopRendererErrorBoundary";
 import { reportDesktopRendererReadyAfterPaint } from "./lib/desktop-renderer-ready";
 import "./styles/globals.css";
@@ -119,7 +118,6 @@ const mountApp = () => {
   initializeTheme();
   installEditorBodyFontFaces();
   applyEditorBodyFontPreference();
-  applyUiFontPreference();
   const Router = isDesktopRenderer ? HashRouter : BrowserRouter;
 
   createRoot(root, {

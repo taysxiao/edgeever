@@ -17,7 +17,6 @@ import {
 } from "@edgeever/shared";
 import { api, ApiRequestError } from "@/lib/api";
 import { isDesktopResourceRuntime, mapMarkdownResourceUrls, mapTiptapResourceUrls, toApiResourceUrl } from "@/lib/desktop-resources";
-import { readEmergencyDraft } from "@/lib/emergency-draft";
 import { notebookDeleteIdsFromPayload } from "@/lib/notebook-delete";
 import { notifyMemoIdRemapped, notifyMemoSyncAcknowledged } from "@/lib/sync-events";
 
@@ -85,41 +84,6 @@ const stagedIdsReferencedByLocalMemos = async (rewrites: StagedResourceRewrite[]
   return referenced;
 };
 
-export const stagedIdsReferencedByUnsavedContent = (
-  rewrites: StagedResourceRewrite[],
-  values: unknown[],
-) => new Set(rewrites
-  .filter((rewrite) => isStagedResourceReferenced(values, rewrite.placeholder.slice("edgeever-staged://".length)))
-  .map((rewrite) => rewrite.placeholder.slice("edgeever-staged://".length)));
-
-const stagedIdsReferencedByRenderer = async (rewrites: StagedResourceRewrite[]) => {
-  if (rewrites.length === 0) return new Set<string>();
-  const memoIds = [...new Set(rewrites.map((rewrite) => rewrite.memoId))];
-  try {
-    const { localDb } = await import("@/lib/local-db");
-    const [drafts, queued] = await Promise.all([
-      localDb.drafts.bulkGet(memoIds),
-      localDb.syncQueue.where("memoId").anyOf(memoIds).toArray(),
-    ]);
-    const visibleSources = typeof document === "undefined" ? [] : [
-      ...Array.from(document.querySelectorAll("[src], [href]"), (element) => (
-        element.getAttribute("src") ?? element.getAttribute("href")
-      )),
-      ...Array.from(document.querySelectorAll("textarea"), (element) => element.value),
-    ];
-    return stagedIdsReferencedByUnsavedContent(rewrites, [
-      ...drafts,
-      ...queued.map((item) => item.payload),
-      ...memoIds.map((memoId) => readEmergencyDraft(memoId)),
-      ...visibleSources,
-    ]);
-  } catch {
-    // If drafts cannot be inspected, keep the bytes until a later sync can
-    // prove that no editor can save the old staged URL again.
-    return new Set(rewrites.map((rewrite) => rewrite.placeholder.slice("edgeever-staged://".length)));
-  }
-};
-
 const remapStagedResourceMemoIds = async (memoIdMappings: ReadonlyMap<string, string>) => {
   if (memoIdMappings.size === 0) return;
   // Keep sync compatible with a renderer hot-reload or an older native shell
@@ -128,31 +92,15 @@ const remapStagedResourceMemoIds = async (memoIdMappings: ReadonlyMap<string, st
 };
 
 const syncStagedResources = async (memoIdMappings: Map<string, string>) => {
-  if (!isDesktopResourceRuntime() || (typeof navigator !== "undefined" && !navigator.onLine)) return { attempted: 0, synced: 0, failed: 0, rewrites: [] as StagedResourceRewrite[], cleanupRewrites: [] as StagedResourceRewrite[], stagedIds: [] as string[] };
-  const bridge = window.edgeeverDesktop!;
-  const [staged, aliases] = await Promise.all([
-    bridge.listStagedResources(),
-    bridge.listStagedResourceAliases?.() ?? Promise.resolve([]),
-  ]);
-  const aliasesById = new Map(aliases.map((item) => [item.id, item]));
+  if (!isDesktopResourceRuntime() || (typeof navigator !== "undefined" && !navigator.onLine)) return { attempted: 0, synced: 0, failed: 0, rewrites: [] as StagedResourceRewrite[], stagedIds: [] as string[] };
+  const staged = await window.edgeeverDesktop!.listStagedResources();
   const pending = await request("sync.outbox.list", { limit: 200 });
   const pendingPayloads = pending.items.map((item) => item.payload);
   let synced = 0;
   let failed = 0;
-  const rewrites: StagedResourceRewrite[] = aliases.map((item) => ({
-    memoId: item.memoId,
-    placeholder: `edgeever-staged://${item.id}`,
-    url: `/api/v1/resources/${encodeURIComponent(item.resourceId)}/blob`,
-  }));
-  const cleanupRewrites: StagedResourceRewrite[] = [];
+  const rewrites: StagedResourceRewrite[] = [];
   const stagedIds: string[] = [];
   for (const item of staged) {
-    const existingAlias = aliasesById.get(item.id);
-    if (existingAlias) {
-      cleanupRewrites.push(rewrites.find((rewrite) => rewrite.placeholder === `edgeever-staged://${item.id}`)!);
-      stagedIds.push(item.id);
-      continue;
-    }
     // An image can finish staging before the editor's debounced local save
     // has queued the memo update that references it. Uploading and deleting
     // the staged file in that gap leaves the memo with an unrecoverable
@@ -170,11 +118,7 @@ const syncStagedResources = async (memoIdMappings: Map<string, string>) => {
         ], { type: item.type }),
       });
       await window.edgeeverDesktop!.sidecarRequest("resource.cache", { resource: uploaded.resource });
-      if (!bridge.recordStagedResourceAlias) throw new Error("Staged resource alias bridge is unavailable");
-      await bridge.recordStagedResourceAlias(item.id, uploaded.resource.url);
-      const rewrite = { memoId, placeholder: `edgeever-staged://${item.id}`, url: uploaded.resource.url };
-      rewrites.push(rewrite);
-      cleanupRewrites.push(rewrite);
+      rewrites.push({ memoId, placeholder: `edgeever-staged://${item.id}`, url: uploaded.resource.url });
       stagedIds.push(item.id);
       synced += 1;
     } catch {
@@ -182,13 +126,13 @@ const syncStagedResources = async (memoIdMappings: Map<string, string>) => {
     }
   }
   try {
-    await patchCreatedMemoResources(cleanupRewrites);
+    await patchCreatedMemoResources(rewrites);
   } catch {
     // Keep the staged files and rewritten outbox payloads recoverable. A later
     // sync can retry the remote patch without losing the local attachment.
-    failed += cleanupRewrites.length > 0 ? 1 : 0;
+    failed += rewrites.length > 0 ? 1 : 0;
   }
-  return { attempted: staged.length, synced, failed, rewrites, cleanupRewrites, stagedIds };
+  return { attempted: staged.length, synced, failed, rewrites, stagedIds };
 };
 
 const removeSyncedStagedResources = async (stagedIds: string[]) => {
@@ -790,10 +734,10 @@ export const syncDesktopData = () => {
       mergeMemoIdMappings(memoIdMappings, outbox.memoIdMappings);
       mergeSyncedMemos(syncedMemos, outbox.syncedMemos);
       if (stagedResources.failed === 0 && outbox.failed === 0 && outbox.conflicted === 0 && creates.conflicted === 0) {
-        const stillReferenced = await stagedIdsReferencedByLocalMemos(stagedResources.cleanupRewrites);
+        const stillReferenced = await stagedIdsReferencedByLocalMemos(stagedResources.rewrites);
         if (stillReferenced.size > 0) {
           try {
-            await patchCreatedMemoResources(stagedResources.cleanupRewrites.filter((rewrite) => {
+            await patchCreatedMemoResources(stagedResources.rewrites.filter((rewrite) => {
               const stagedId = rewrite.placeholder.slice("edgeever-staged://".length);
               return stillReferenced.has(stagedId);
             }));
@@ -802,12 +746,11 @@ export const syncDesktopData = () => {
           }
         }
         const remainingReferenced = stillReferenced.size > 0
-          ? await stagedIdsReferencedByLocalMemos(stagedResources.cleanupRewrites)
+          ? await stagedIdsReferencedByLocalMemos(stagedResources.rewrites)
           : stillReferenced;
-        const rendererReferenced = await stagedIdsReferencedByRenderer(stagedResources.cleanupRewrites);
-        await removeSyncedStagedResources(stagedResources.stagedIds.filter((stagedId) => (
-          !remainingReferenced.has(stagedId) && !rendererReferenced.has(stagedId)
-        )));
+        await removeSyncedStagedResources(
+          stagedResources.stagedIds.filter((stagedId) => !remainingReferenced.has(stagedId)),
+        );
       }
       phase = "read_status";
       const remaining = await request("sync.status", {});

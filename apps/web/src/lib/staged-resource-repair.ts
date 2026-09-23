@@ -106,13 +106,7 @@ export const findMatchingMemoResource = (
   const normalizedFilename = filename?.trim();
   if (normalizedFilename) {
     const named = pool.filter((resource) => resource.filename === normalizedFilename);
-    if (named.length === 1) return named[0];
-    if (named.length > 1) return null;
-    // Image compression may change only the extension (for example, .jpg to
-    // .webp) while the editor keeps the original filename as the image alt.
-    const stem = normalizedFilename.replace(/\.[^.]+$/, "");
-    const sameStem = pool.filter((resource) => resource.filename?.replace(/\.[^.]+$/, "") === stem);
-    return sameStem.length === 1 ? sameStem[0] : null;
+    return named[0] ?? null;
   }
   if (pool.length === 1) return pool[0];
   return null;

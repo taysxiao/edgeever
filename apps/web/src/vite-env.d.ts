@@ -72,8 +72,6 @@ interface EdgeEverDesktopBridge {
   completeStagedResource(id: string): Promise<{ id: string }>;
   abortStagedResource(id: string): Promise<void>;
   listStagedResources(): Promise<Array<{ id: string; memoId: string; name: string; type: string; size: number }>>;
-  listStagedResourceAliases?(memoId?: string): Promise<Array<{ id: string; memoId: string; resourceId: string }>>;
-  recordStagedResourceAlias?(id: string, uploadedUrl: string): Promise<{ id: string; resourceId: string }>;
   remapStagedResourceMemoIds?(mappings: Array<[string, string]>): Promise<{ updated: number }>;
   readStagedResource(id: string): Promise<{ name: string; type: string; bytes: Uint8Array }>;
   readStagedResourcePart(id: string, start: number, length: number): Promise<ArrayBuffer>;
@@ -89,8 +87,7 @@ interface EdgeEverDesktopBridge {
   onImportMarkdown(callback: (payload: { name: string; content: string }) => void): () => void;
   onImportScreenshot?(callback: (payload: { captureId?: string; name: string; type: string; title?: string; bytes: Uint8Array }) => void): () => void;
   readWeChatImportMedia?(importId: string, mediaId: string): Promise<{ filename: string; mimeType: string; bytes: Uint8Array }>;
-  finishWeChatImport?(importId: string, success: boolean): Promise<void>;
-  retryWeChatImport?(importId: string): Promise<boolean>;
+  finishWeChatImport?(importId: string): Promise<void>;
   onImportWeChatChat?(callback: (payload: {
     ok: boolean;
     reason?: string;

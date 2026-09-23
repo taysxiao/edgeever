@@ -11,8 +11,6 @@ import type { EdgeEverRepository } from "@/lib/repository";
 import { api, getConfiguredDesktopApiBaseUrl } from "@/lib/api";
 import { createStagedResourceListItem, mapMarkdownResourceUrls, mapTiptapResourceUrls, toApiResourceUrl, toDesktopResourceUrl } from "@/lib/desktop-resources";
 import {
-  applyStagedResourceUrlRewrites,
-  collectStagedResourceReferences,
   contentReferencesStagedResourceUrl,
   repairMemoStagedResourceUrls,
   stagedResourceIdFromUrl,
@@ -49,22 +47,6 @@ const resourcesForMemo = async (memoId: string) => {
   return listed.resources.filter((resource) => resource.memoId === memoId);
 };
 
-const rewriteUploadedAliases = async <T extends { contentJson?: unknown; contentMarkdown?: string | null }>(memoId: string, memo: T): Promise<T> => {
-  const aliases = await window.edgeeverDesktop?.listStagedResourceAliases?.(memoId) ?? [];
-  if (aliases.length === 0) return memo;
-  const rewrites = aliases.map((item) => ({
-    placeholder: `edgeever-staged://${item.id}`,
-    url: `/api/v1/resources/${encodeURIComponent(item.resourceId)}/blob`,
-  }));
-  return {
-    ...memo,
-    contentJson: applyStagedResourceUrlRewrites(memo.contentJson, rewrites) as T["contentJson"],
-    contentMarkdown: typeof memo.contentMarkdown === "string"
-      ? applyStagedResourceUrlRewrites(memo.contentMarkdown, rewrites) as string
-      : memo.contentMarkdown,
-  };
-};
-
 const repairDisplayedMemo = async (memo: MemoDetail): Promise<MemoDetail> => {
   if (
     !contentReferencesStagedResourceUrl(memo.contentJson)
@@ -72,11 +54,11 @@ const repairDisplayedMemo = async (memo: MemoDetail): Promise<MemoDetail> => {
   ) {
     return toDisplayMemo(memo);
   }
-  const aliased = await rewriteUploadedAliases(memo.id, memo);
-  if (!contentReferencesStagedResourceUrl(aliased.contentJson)
-    && !contentReferencesStagedResourceUrl(aliased.contentMarkdown)) return toDisplayMemo(aliased);
-  const [resources, liveStagedIds] = await Promise.all([resourcesForMemo(memo.id), liveStagedIdsForMemo(memo.id)]);
-  return toDisplayMemo(repairMemoStagedResourceUrls(aliased, resources, liveStagedIds));
+  const [resources, liveStagedIds] = await Promise.all([
+    resourcesForMemo(memo.id),
+    liveStagedIdsForMemo(memo.id),
+  ]);
+  return toDisplayMemo(repairMemoStagedResourceUrls(memo, resources, liveStagedIds));
 };
 
 const listStagedResources = async (): Promise<ResourceListItem[]> => {
@@ -294,21 +276,12 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
   updateMemo: async (memo: MemoDetail, input) => {
     const needsStagedRepair = contentReferencesStagedResourceUrl(input.contentJson)
       || contentReferencesStagedResourceUrl(input.contentMarkdown);
-    const aliasedInput = needsStagedRepair
-      ? await rewriteUploadedAliases(memo.id, { contentJson: input.contentJson, contentMarkdown: input.contentMarkdown })
+    const repairedInput = needsStagedRepair
+      ? repairMemoStagedResourceUrls(
+        { contentJson: input.contentJson, contentMarkdown: input.contentMarkdown },
+        ...(await Promise.all([resourcesForMemo(memo.id), liveStagedIdsForMemo(memo.id)])),
+      )
       : input;
-    const repairedInput = contentReferencesStagedResourceUrl(aliasedInput.contentJson)
-      || contentReferencesStagedResourceUrl(aliasedInput.contentMarkdown)
-      ? repairMemoStagedResourceUrls(aliasedInput, ...(await Promise.all([resourcesForMemo(memo.id), liveStagedIdsForMemo(memo.id)])))
-      : aliasedInput;
-    if (contentReferencesStagedResourceUrl(repairedInput.contentJson)
-      || contentReferencesStagedResourceUrl(repairedInput.contentMarkdown)) {
-      const live = new Set((await window.edgeeverDesktop?.listStagedResources() ?? []).map((item) => item.id));
-      const references = collectStagedResourceReferences(repairedInput);
-      if (references.length === 0 || references.some((reference) => !live.has(reference.stagedId))) {
-        throw new Error("Memo contains a missing staged resource");
-      }
-    }
     const portableContentJson = mapTiptapResourceUrls(repairedInput.contentJson ?? input.contentJson, toApiResourceUrl);
     const contentMarkdown = repairedInput.contentMarkdown === undefined && input.contentMarkdown === undefined
       ? docToMarkdown(portableContentJson)
